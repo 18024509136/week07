@@ -1,7 +1,11 @@
 package com.geek.dbtest;
 
+import com.alibaba.druid.pool.DruidDataSource;
+
 import java.sql.*;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 大批量数据插入测试类
@@ -21,6 +25,7 @@ public class DbInsertTests extends DbTestApplicationTests {
      * (1)normalInsert方法不管事务是否开启，插入效率极其低下，等待遥遥无期
      * (2)multiValuesInsert的方法耗时20秒左右，但是sql的长度被max_allowed_packet参数所限制，无法实现更大的批次数量，目前上限是50000
      * (3)batchInsert的方法耗时也是20秒左右，但是批次数量可以去到100000。经测试合适批次大小范围是10000~50000，过小或过大的批次大小将影响插入效率
+     * (4)batchInsertMultiThread是batchInsert的多线程版本，方法耗时16秒，效率较之前的有提高，批次数量5000为宜，数据库连接数大于或或等于线程数
      *
      * @param args
      */
@@ -28,7 +33,8 @@ public class DbInsertTests extends DbTestApplicationTests {
         long startTime = System.currentTimeMillis();
         //normalInsert();
         //multiValuesInsert();
-        batchInsert();
+        //batchInsert();
+        batchInsertMultiThread();
         long endTime = System.currentTimeMillis();
         System.out.println("用时" + (endTime - startTime) + "毫秒");
 
@@ -166,6 +172,66 @@ public class DbInsertTests extends DbTestApplicationTests {
             closeResource(ps, connection);
         }
 
+    }
+
+    public static void batchInsertMultiThread() {
+        String sql = "INSERT INTO order_info (order_no, user_id, user_addr_id, pay_channel, total_num, total_amount, express_price, status) values (?,?,?,?,?,?,?,?)";
+        DruidDataSource dataSource = new DruidDataSource();
+        dataSource.setUrl(URL);
+        dataSource.setUsername(USERNAME);
+        dataSource.setPassword(PASSOWRD);
+        dataSource.setMaxActive(10);
+        dataSource.setMinIdle(10);
+
+        final CountDownLatch countDownLatch = new CountDownLatch(10);
+
+        for (int i = 0; i < 10; i++) {
+
+            new Thread(() -> {
+                Connection connection = null;
+                PreparedStatement ps = null;
+
+                try {
+                    connection = dataSource.getConnection();
+                    connection.setAutoCommit(false);
+                    ps = connection.prepareStatement(sql);
+
+                    for (int j = 0; j < 20; j++) {
+                        for (int k = 0; k < 5000; k++) {
+                            String orderNo = UUID.randomUUID().toString().replace("-", "");
+                            ps.setString(1, orderNo);
+                            ps.setString(2, "1");
+                            ps.setString(3, "1");
+                            ps.setInt(4, 1);
+                            ps.setInt(5, 1);
+                            ps.setInt(6, 100000);
+                            ps.setInt(7, 12000);
+                            ps.setInt(8, 1);
+
+                            ps.addBatch();
+                        }
+                        ps.executeBatch();
+                        ps.clearBatch();
+
+                        connection.commit();
+                    }
+
+                    countDownLatch.countDown();
+                } catch (SQLException e) {
+                    e.printStackTrace();
+                } finally {
+                    closeResource(ps, connection);
+                }
+
+            }).start();
+        }
+
+        try {
+            countDownLatch.await(40, TimeUnit.SECONDS);
+            dataSource.close();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
     }
 
     private static void closeResource(PreparedStatement ps, Connection connection) {
